@@ -1,3 +1,7 @@
+# MRNewls fork > I will be attempting to implement this with PSO from pyswarms to replicate the research paper found here:
+https://www.researchgate.net/publication/259240183_A_Machine_Learning_Model_for_Stock_Market_Prediction
+
+
 # LSSVMlib
 Library of python classes for performing Least-Squares Support Vector Machine (LS-SVM) 
 machine-learning modeling. The classes are build to conform to the scikit-learn API allowing for 
