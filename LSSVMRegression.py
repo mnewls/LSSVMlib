@@ -41,13 +41,6 @@ class LSSVMRegression(BaseEstimator, RegressorMixin):
         - intercept_ : intercept term
 
     """
-
-    '''def __call__(self, x):
-        self.gamma = gamma
-        self.c = c
-        self.d = d
-        self.sigma = sigma'''
-
     def __init__(self, gamma: float = 1.0, kernel: str = None, c: float = 1.0,
                  d: float = 2, sigma: float = 1.0):
         """
@@ -94,7 +87,7 @@ class LSSVMRegression(BaseEstimator, RegressorMixin):
             These exclude the modelparameters.
         """
         return {"c": self.c, "d": self.d, "gamma": self.gamma,
-                "kernel": self.kernel, "sigma":self.sigma, "coef":self.coef_, "intercept":self.intercept_}
+                "kernel": self.kernel, "sigma":self.sigma}
 
     def set_params(self, **parameters):
         """
@@ -279,11 +272,9 @@ class LSSVMRegression(BaseEstimator, RegressorMixin):
         Omega = self.kernel_(self.x, self.x)
         Ones = np.array([[1]]*len(self.y)) # needs to be a 2D 1-column vector, hence [[ ]]
 
-        convert_1_over = 1 / self.gamma
-
         A_dag = np.linalg.pinv(np.block([
             [0,                           Ones.T                      ],
-            [Ones,   Omega + convert_1_over * np.identity(len(self.y))]
+            [Ones,   Omega + self.gamma**-1 * np.identity(len(self.y))]
         ])) #need to check if the matrix is OK--> y.T parts
         B = np.concatenate((np.array([0]), self.y), axis=None)
 
