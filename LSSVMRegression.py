@@ -20,8 +20,13 @@ I_N = NxN unity matrix
 @web   : https://dannyvanpoucke.be
 """
 import numpy as np
+from numpy import inf
 import pandas as pd
+#import numexpr as ne
 from sklearn.base import BaseEstimator, RegressorMixin
+
+from numba import njit
+import time
 
 
 class LSSVMRegression(BaseEstimator, RegressorMixin):
@@ -41,6 +46,13 @@ class LSSVMRegression(BaseEstimator, RegressorMixin):
         - intercept_ : intercept term
 
     """
+
+    '''def __call__(self, x):
+        self.gamma = gamma
+        self.c = c
+        self.d = d
+        self.sigma = sigma'''
+
     def __init__(self, gamma: float = 1.0, kernel: str = None, c: float = 1.0,
                  d: float = 2, sigma: float = 1.0):
         """
@@ -87,7 +99,7 @@ class LSSVMRegression(BaseEstimator, RegressorMixin):
             These exclude the modelparameters.
         """
         return {"c": self.c, "d": self.d, "gamma": self.gamma,
-                "kernel": self.kernel, "sigma":self.sigma}
+                "kernel": self.kernel, "sigma":self.sigma, "coef":self.coef_, "intercept":self.intercept_}
 
     def set_params(self, **parameters):
         """
@@ -169,7 +181,11 @@ class LSSVMRegression(BaseEstimator, RegressorMixin):
             """
             return ((np.dot(xi, xj.T))/c  + 1)**d
 
-        def rbf(xi, xj, sigma=params.get('sigma', 1.0)):
+        sigma = params.get('sigma', 1.0)
+
+        @njit(parallel=True, fastmath=True)
+        def rbf(xi, xj, sigma = sigma):
+            
             """
             Radial Basis Function kernel= exp(- ||xj-xi||² / (2*sigma²))
             In this formulation, the rbf is also known as the Gaussian kernel of variance sigma²
@@ -213,7 +229,9 @@ class LSSVMRegression(BaseEstimator, RegressorMixin):
                 --> or use cdist which calculates the pairwise distance and use that in the exp
 
             """
-            from scipy.spatial.distance import cdist
+            #from scipy.spatial.distance import cdist
+            #from scipy.linalg.blas import sgemm
+            #import numexpr as ne
 
            # print('LS_SVM DEBUG: Sigma=',sigma,'  type=',type(sigma) )
            # print('              xi   =',xi,'  type=',type(xi))
@@ -221,11 +239,39 @@ class LSSVMRegression(BaseEstimator, RegressorMixin):
 
 
             if (xi.ndim == 2 and xi.ndim == xj.ndim): # both are 2D matrices
-                return np.exp(-(cdist(xi, xj, metric='sqeuclidean'))/(2*(sigma**2)))
+                #tic = time.perf_counter()
+                ## uses 2x2
+                #print('using the 2x2')
+                print('i am fitting the kernel')
+
+                X_norm = -sigma*np.sum(xi, axis=-1)
+                Y_norm = -sigma*np.sum(xj, axis=-1)
+                '''ret_val = ne.evaluate('exp(A + B + 2 * C)', {\
+                    'A' : X_norm[:,None],\
+                    'B' : Y_norm[None,:],\
+                    'C' : np.dot(xi,xj.T),\
+                    'g' : sigma,\
+                })'''
+
+                ret_val = np.exp(-sigma * (X_norm + Y_norm - 2 * np.dot(xi, xj.T)))
+
+                print('done fitting kernel')
+
+                #toc = time.perf_counter()
+                #tic_toc = (toc - tic) / 60
+                #print('time for kernel: '+ tic_toc)
+                return ret_val
+
+                #return np.exp(-(cdist(xi, xj, metric='sqeuclidean'))/(2*(sigma**2)))
+                
+
+
             elif ((xi.ndim < 2) and (xj.ndim < 3)):
+                print('using the 2x3')
                 ax = len(xj.shape)-1 #compensate for python zero-base
                 return np.exp(-(np.dot(xi, xi) + (xj**2).sum(axis=ax)
                                 - 2*np.dot(xi, xj.T))/(2*(sigma**2)))
+                                
             else:
                 message = "The rbf kernel is not suited for arrays with rank >2"
                 raise Exception(message)
@@ -237,7 +283,9 @@ class LSSVMRegression(BaseEstimator, RegressorMixin):
             message = "Kernel "+name+" is not implemented. Please choose from : "
             message += str(list(kernels.keys())).strip('[]')
             raise KeyError(message)
+    
 
+    
     def __OptimizeParams(self):
         """
         Solve the matrix operation to get the coefficients.
@@ -269,19 +317,51 @@ class LSSVMRegression(BaseEstimator, RegressorMixin):
         #B = np.array([0]+[1]*len(y_values))
 
         #Regression
+        print('starting to opt ')
+        len_self_y = len(self.y)
+        self_y = self.y
+
         Omega = self.kernel_(self.x, self.x)
-        Ones = np.array([[1]]*len(self.y)) # needs to be a 2D 1-column vector, hence [[ ]]
+        Ones = np.array([[1]]*len_self_y) # needs to be a 2D 1-column vector, hence [[ ]]
 
-        A_dag = np.linalg.pinv(np.block([
-            [0,                           Ones.T                      ],
-            [Ones,   Omega + self.gamma**-1 * np.identity(len(self.y))]
-        ])) #need to check if the matrix is OK--> y.T parts
-        B = np.concatenate((np.array([0]), self.y), axis=None)
+        convert_1_over = 1 / self.gamma
 
-        solution = np.dot(A_dag, B)
-        self.intercept_ = solution[0]
-        self.coef_      = solution[1:]
+        blocked_np = np.block([
+                [0,                           Ones.T                      ],
+                [Ones,   Omega + convert_1_over * np.identity(len_self_y)]
+            ])
 
+        B = np.concatenate((np.array([0]), self_y), axis=None)
+
+        col_mean = np.nanmean(blocked_np, axis=0)
+
+        inds = np.where(np.isnan(blocked_np))
+        inds_inf = np.where(np.isinf(blocked_np))
+
+        blocked_np[inds] = np.take(col_mean, inds[1])
+        blocked_np[inds_inf] = np.take(col_mean, inds_inf[1])
+
+        blocked_np[blocked_np == inf] = 0
+
+        array_has_nan = np.isnan(blocked_np).any()
+        array_has_inf = np.isinf(blocked_np).any()
+        print(array_has_nan)
+        print(array_has_inf)
+
+        @njit(parallel=True, fastmath=True)
+        def do_calc(B, blocked_np):
+            A_dag = np.linalg.pinv(blocked_np) #need to check if the matrix is OK--> y.T parts
+            
+            solution = np.dot(A_dag, B)
+
+            return solution
+
+        this_sol = do_calc(B, blocked_np)
+
+        print('opt complete')
+        
+        self.intercept_ = this_sol[0]
+        self.coef_      = this_sol[1:]
 
     def fit(self, X: np.ndarray, y: np.ndarray):
         """
@@ -295,6 +375,7 @@ class LSSVMRegression(BaseEstimator, RegressorMixin):
         """
 
         #print("IN FIT==> GAMMA=",self.gamma,"  SIGMA=",self.sigma)
+        print("I am training in LSSVM.fit")
 
         if isinstance(X, (pd.DataFrame, pd.Series)): #checks if X is an instance of either types
             Xloc = X.to_numpy()
@@ -316,6 +397,7 @@ class LSSVMRegression(BaseEstimator, RegressorMixin):
                 "and 1D array of targets"
             raise Exception(message)
 
+    #@njit(parallel=True, fastmath=True)
     def predict(self, X: np.ndarray)->np.ndarray:
         """
         Predict the regression values for a set of feature vectors
@@ -326,4 +408,6 @@ class LSSVMRegression(BaseEstimator, RegressorMixin):
         """
         Ker = self.kernel_(X, self.x) #second component should be the array of training vectors
         Y = np.dot(self.coef_, Ker.T) + self.intercept_
+
+        print('i am done predicting')
         return Y
